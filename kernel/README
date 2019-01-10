@@ -1,0 +1,22 @@
+xMwait
+======
+
+xMwait includes xHalt and xPause. They completely solve frequent
+context switch overhead in virtualized systems.
+
+HOWTO
+=====
+
+$ cd linux
+$ patch -p1 < ./xMwait_v1.patch
+$ compile kernel and install
+
+start xHalt: 
+
+$ vPair/scripts/enable_halt_mwait.sh
+
+start xPause:
+
+$ vPair/scripts/set_spinlock_sleeptime.sh 100000
+
+$ vPair/scripts/enable_pause_mwait.sh

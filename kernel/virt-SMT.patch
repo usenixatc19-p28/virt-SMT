@@ -1,0 +1,883 @@
+diff -Naur linux-3.16.39/arch/x86/include/asm/cpufeature.h linux-3.16.39.virtSMT/arch/x86/include/asm/cpufeature.h
+--- linux-3.16.39/arch/x86/include/asm/cpufeature.h	2016-11-19 20:17:41.000000000 -0500
++++ linux-3.16.39.virtSMT/arch/x86/include/asm/cpufeature.h	2018-11-25 02:19:49.964472396 -0500
+@@ -171,6 +171,7 @@
+ #define X86_FEATURE_PERFCTR_CORE (6*32+23) /* core performance counter extensions */
+ #define X86_FEATURE_PERFCTR_NB  (6*32+24) /* NB performance counter extensions */
+ #define X86_FEATURE_PERFCTR_L2	(6*32+28) /* L2 performance counter extensions */
++#define X86_FEATURE_MWAITX	(6*32+29) /* added by  MWAIT extension (MONITORX/MWAITX) */
+ 
+ /*
+  * Auxiliary flags: Linux defined - For features scattered in various
+diff -Naur linux-3.16.39/arch/x86/include/asm/msr.h linux-3.16.39.virtSMT/arch/x86/include/asm/msr.h
+--- linux-3.16.39/arch/x86/include/asm/msr.h	2016-11-19 20:17:41.000000000 -0500
++++ linux-3.16.39.virtSMT/arch/x86/include/asm/msr.h	2018-11-25 02:19:49.968472434 -0500
+@@ -119,6 +119,14 @@
+ 	return EAX_EDX_VAL(val, low, high);
+ }
+ 
++//added by 
++static __always_inline unsigned long long rdtsc_ordered(void)
++{
++	//barrier_nospec();
++	return __native_read_tsc();
++}
++//end
++
+ static inline unsigned long long native_read_pmc(int counter)
+ {
+ 	DECLARE_ARGS(val, low, high);
+diff -Naur linux-3.16.39/arch/x86/include/asm/mwait.h linux-3.16.39.virtSMT/arch/x86/include/asm/mwait.h
+--- linux-3.16.39/arch/x86/include/asm/mwait.h	2016-11-19 20:17:41.000000000 -0500
++++ linux-3.16.39.virtSMT/arch/x86/include/asm/mwait.h	2018-11-25 02:19:49.972472473 -0500
+@@ -14,6 +14,11 @@
+ #define CPUID5_ECX_INTERRUPT_BREAK	0x2
+ 
+ #define MWAIT_ECX_INTERRUPT_BREAK	0x1
++//added by 
++#define MWAITX_ECX_TIMER_ENABLE		BIT(1)
++#define MWAITX_MAX_LOOPS		((u32)-1)
++#define MWAITX_DISABLE_CSTATES		0xf
++//end
+ 
+ static inline void __monitor(const void *eax, unsigned long ecx,
+ 			     unsigned long edx)
+@@ -38,6 +43,30 @@
+ 		     :: "a" (eax), "c" (ecx));
+ }
+ 
++//added by 
++static inline void __monitorx(const void *eax, unsigned long ecx,
++		unsigned long edx) {
++	/* "monitorx %eax, %ecx, %edx;" */
++	asm volatile(".byte 0x0f, 0x01, 0xfa;"
++				 :: "a" (eax), "c" (ecx), "d"(edx));
++}
++
++static inline void __mwaitx(unsigned long eax, unsigned long ebx,
++							unsigned long ecx) {
++	/* "mwaitx %eax, %ebx, %ecx;" */
++	asm volatile(".byte 0x0f, 0x01, 0xfb;"
++				 :: "a" (eax), "b" (ebx), "c" (ecx));
++}
++
++static inline void __sti_mwaitx(unsigned long eax, unsigned long ebx,
++		unsigned long ecx) {
++	trace_hardirqs_on();
++	/* "mwaitx %eax, %ebx, %ecx;" */
++	asm volatile("sti; .byte 0x0f, 0x01, 0xfb;"
++				 :: "a" (eax), "b" (ebx), "c" (ecx));
++}
++//end
++
+ /*
+  * This uses new MONITOR/MWAIT instructions on P4 processors with PNI,
+  * which can obviate IPI to trigger checking of need_resched.
+diff -Naur linux-3.16.39/arch/x86/kvm/x86.c linux-3.16.39.virtSMT/arch/x86/kvm/x86.c
+--- linux-3.16.39/arch/x86/kvm/x86.c	2016-11-19 20:17:41.000000000 -0500
++++ linux-3.16.39.virtSMT/arch/x86/kvm/x86.c	2018-11-25 02:19:50.020472937 -0500
+@@ -102,6 +102,13 @@
+ u32  kvm_max_guest_tsc_khz;
+ EXPORT_SYMBOL_GPL(kvm_max_guest_tsc_khz);
+ 
++//added by 
++#include <asm/mwait.h>
++extern int enable_halt_xmwait;
++extern int mwait_addr[49];
++extern int mwait_monitor_flag;
++//ended
++
+ /* tsc tolerance in parts per million - default to 1/2 of the NTP threshold */
+ static u32 tsc_tolerance_ppm = 250;
+ module_param(tsc_tolerance_ppm, uint, S_IRUGO | S_IWUSR);
+@@ -6115,6 +6122,17 @@
+ 	}
+ 
+ 	trace_kvm_entry(vcpu->vcpu_id);
++
++	//added by 
++	if (enable_halt_xmwait) {
++	//		mwait_addr[smp_processor_id()] == 0)
++		//mwait_addr[vcpu->mwait_idx] = 1;
++		vcpu->mwait_idx = 1;
++		//mwait_monitor_flag = 0;
++		//mwait_addr[smp_processor_id()] = 0;
++		//mwait_monitor_flag[smp_processor_id()] = 1;
++	}
++	//ended
+ 	kvm_x86_ops->run(vcpu);
+ 
+ 	/*
+diff -Naur linux-3.16.39/include/linux/kvm_host.h linux-3.16.39.virtSMT/include/linux/kvm_host.h
+--- linux-3.16.39/include/linux/kvm_host.h	2016-11-19 20:17:41.000000000 -0500
++++ linux-3.16.39.virtSMT/include/linux/kvm_host.h	2018-11-25 02:19:50.116473863 -0500
+@@ -225,6 +225,16 @@
+ 	int cpu;
+ 	int vcpu_id;
+ 	int srcu_idx;
++	int mwait_idx; //added by 
++	int sl_flag; //added by , spin-lock flag
++	int mwait_flag; //added by 
++	//for resource retention
++	ktime_t rr_start;
++	ktime_t rr_end;
++	ktime_t rr_diff;
++	ktime_t rr_last;
++	int rr_flag;
++	//end
+ 	int mode;
+ 	unsigned long requests;
+ 	unsigned long guest_debug;
+@@ -239,6 +249,7 @@
+ 	int sigset_active;
+ 	sigset_t sigset;
+ 	struct kvm_vcpu_stat stat;
++	unsigned int halt_poll_ns; //added by 
+ 
+ #ifdef CONFIG_HAS_IOMEM
+ 	int mmio_needed;
+diff -Naur linux-3.16.39/include/linux/sched.h linux-3.16.39.virtSMT/include/linux/sched.h
+--- linux-3.16.39/include/linux/sched.h	2016-11-19 20:17:41.000000000 -0500
++++ linux-3.16.39.virtSMT/include/linux/sched.h	2018-11-25 02:19:50.132474017 -0500
+@@ -59,6 +59,7 @@
+ 
+ #include <asm/processor.h>
+ 
++
+ #define SCHED_ATTR_SIZE_VER0	48	/* sizeof first published struct */
+ 
+ /*
+@@ -1324,6 +1325,12 @@
+ 	unsigned sched_reset_on_fork:1;
+ 	unsigned sched_contributes_to_load:1;
+ 
++	//added by 
++	//struct timeval __ts;
++	long __start_ts;
++	long __end_ts;
++	//ended
++
+ 	pid_t pid;
+ 	pid_t tgid;
+ 
+diff -Naur linux-3.16.39/kernel/sched/core.c linux-3.16.39.virtSMT/kernel/sched/core.c
+--- linux-3.16.39/kernel/sched/core.c	2016-11-19 20:17:41.000000000 -0500
++++ linux-3.16.39.virtSMT/kernel/sched/core.c	2018-11-25 02:19:50.212474789 -0500
+@@ -90,6 +90,171 @@
+ #define CREATE_TRACE_POINTS
+ #include <trace/events/sched.h>
+ 
++//added by 
++#include <linux/time.h>
++//in VM1, vCPU2 - vCPU7 are shared pCPU3-pCPU8
++//resources with VM2 so export their information for guest use.
++int enable_vm1_flag = 0;
++module_param(enable_vm1_flag, int, 0664);
++EXPORT_SYMBOL_GPL(enable_vm1_flag);
++int enable_vm1_debug = 0;
++module_param(enable_vm1_debug, int, 0664);
++EXPORT_SYMBOL_GPL(enable_vm1_debug);
++int debug_vm1_vcpu = 0;
++module_param(debug_vm1_vcpu, int, 0664);
++EXPORT_SYMBOL_GPL(debug_vm1_vcpu);
++
++//XXX: vCPU0 is pinned with dedicated PCPU, which
++//is used to handled interrupts (virtio) in VM
++#if 0
++int vm1_vcpu1_pid = 0;
++module_param(vm1_vcpu1_pid, int, 0664);
++EXPORT_SYMBOL_GPL(vm1_vcpu1_pid);
++long vm1_vcpu1_ts = 0;
++module_param(vm1_vcpu1_ts, long, 0664);
++EXPORT_SYMBOL_GPL(vm1_vcpu1_ts);
++int vm1_is_vcpu1_on = 0;
++module_param(vm1_is_vcpu1_on, int, 0664);
++EXPORT_SYMBOL_GPL(vm1_is_vcpu1_on);
++long vm1_vcpu1_curr_ts = 0;
++module_param(vm1_vcpu1_curr_ts, long, 0664);
++EXPORT_SYMBOL_GPL(vm1_vcpu1_curr_ts);
++#endif
++
++//resource retention
++int enable_rr = 0;
++module_param(enable_rr, int, 0664);
++EXPORT_SYMBOL_GPL(enable_rr);
++int rr_dedicated_vcpu_id = 0;
++module_param(rr_dedicated_vcpu_id, int, 0664);
++EXPORT_SYMBOL_GPL(rr_dedicated_vcpu_id);
++int rr_retention_time = 0;
++module_param(rr_retention_time, int, 0664);
++EXPORT_SYMBOL_GPL(rr_retention_time);
++
++
++//vCPU PID in host OS
++int vm1_vcpu2_pid = 0;
++module_param(vm1_vcpu2_pid, int, 0664);
++EXPORT_SYMBOL_GPL(vm1_vcpu2_pid);
++//The timestamp when this vCPU is scheduled on pCPU
++long vm1_vcpu2_curr_ts = 0;
++module_param(vm1_vcpu2_curr_ts, long, 0664);
++EXPORT_SYMBOL_GPL(vm1_vcpu2_curr_ts);
++//The last timeslice of this vCPU
++long vm1_vcpu2_ts = 0;
++module_param(vm1_vcpu2_ts, long, 0664);
++EXPORT_SYMBOL_GPL(vm1_vcpu2_ts);
++//Flag of whether this vCPU is on pCPU
++int vm1_is_vcpu2_on = 0;
++module_param(vm1_is_vcpu2_on, int, 0664);
++EXPORT_SYMBOL_GPL(vm1_is_vcpu2_on);
++
++int vm1_vcpu3_pid = 0;
++module_param(vm1_vcpu3_pid, int, 0664);
++EXPORT_SYMBOL_GPL(vm1_vcpu3_pid);
++long vm1_vcpu3_curr_ts = 0;
++module_param(vm1_vcpu3_curr_ts, long, 0664);
++EXPORT_SYMBOL_GPL(vm1_vcpu3_curr_ts);
++long vm1_vcpu3_ts = 0;
++module_param(vm1_vcpu3_ts, long, 0664);
++EXPORT_SYMBOL_GPL(vm1_vcpu3_ts);
++int vm1_is_vcpu3_on = 0;
++module_param(vm1_is_vcpu3_on, int, 0664);
++EXPORT_SYMBOL_GPL(vm1_is_vcpu3_on);
++
++int vm1_vcpu4_pid = 0;
++module_param(vm1_vcpu4_pid, int, 0664);
++EXPORT_SYMBOL_GPL(vm1_vcpu4_pid);
++long vm1_vcpu4_ts = 0;
++module_param(vm1_vcpu4_ts, long, 0664);
++EXPORT_SYMBOL_GPL(vm1_vcpu4_ts);
++long vm1_vcpu4_curr_ts = 0;
++module_param(vm1_vcpu4_curr_ts, long, 0664);
++EXPORT_SYMBOL_GPL(vm1_vcpu4_curr_ts);
++int vm1_is_vcpu4_on = 0;
++module_param(vm1_is_vcpu4_on, int, 0664);
++EXPORT_SYMBOL_GPL(vm1_is_vcpu4_on);
++
++int vm1_vcpu5_pid = 0;
++module_param(vm1_vcpu5_pid, int, 0664);
++EXPORT_SYMBOL_GPL(vm1_vcpu5_pid);
++long vm1_vcpu5_ts = 0;
++module_param(vm1_vcpu5_ts, long, 0664);
++EXPORT_SYMBOL_GPL(vm1_vcpu5_ts);
++long vm1_vcpu5_curr_ts = 0;
++module_param(vm1_vcpu5_curr_ts, long, 0664);
++EXPORT_SYMBOL_GPL(vm1_vcpu5_curr_ts);
++int vm1_is_vcpu5_on = 0;
++module_param(vm1_is_vcpu5_on, int, 0664);
++EXPORT_SYMBOL_GPL(vm1_is_vcpu5_on);
++
++int vm1_vcpu6_pid = 0;
++module_param(vm1_vcpu6_pid, int, 0664);
++EXPORT_SYMBOL_GPL(vm1_vcpu6_pid);
++long vm1_vcpu6_ts = 0;
++module_param(vm1_vcpu6_ts, long, 0664);
++EXPORT_SYMBOL_GPL(vm1_vcpu6_ts);
++long vm1_vcpu6_curr_ts = 0;
++module_param(vm1_vcpu6_curr_ts, long, 0664);
++EXPORT_SYMBOL_GPL(vm1_vcpu6_curr_ts);
++int vm1_is_vcpu6_on = 0;
++module_param(vm1_is_vcpu6_on, int, 0664);
++EXPORT_SYMBOL_GPL(vm1_is_vcpu6_on);
++
++int vm1_vcpu7_pid = 0;
++module_param(vm1_vcpu7_pid, int, 0664);
++EXPORT_SYMBOL_GPL(vm1_vcpu7_pid);
++long vm1_vcpu7_ts = 0;
++module_param(vm1_vcpu7_ts, long, 0664);
++EXPORT_SYMBOL_GPL(vm1_vcpu7_ts);
++long vm1_vcpu7_curr_ts = 0;
++module_param(vm1_vcpu7_curr_ts, long, 0664);
++EXPORT_SYMBOL_GPL(vm1_vcpu7_curr_ts);
++int vm1_is_vcpu7_on = 0;
++module_param(vm1_is_vcpu7_on, int, 0664);
++EXPORT_SYMBOL_GPL(vm1_is_vcpu7_on);
++
++#if 0
++int vm1_vcpu8_pid = 0;
++module_param(vm1_vcpu8_pid, int, 0664);
++EXPORT_SYMBOL_GPL(vm1_vcpu8_pid);
++long vm1_vcpu8_ts = 0;
++module_param(vm1_vcpu8_ts, long, 0664);
++EXPORT_SYMBOL_GPL(vm1_vcpu8_ts);
++long vm1_vcpu8_curr_ts = 0;
++module_param(vm1_vcpu8_curr_ts, long, 0664);
++EXPORT_SYMBOL_GPL(vm1_vcpu8_curr_ts);
++int vm1_is_vcpu8_on = 0;
++module_param(vm1_is_vcpu8_on, int, 0664);
++EXPORT_SYMBOL_GPL(vm1_is_vcpu8_on);
++#endif
++//ended
++
++//Added by 
++//For xMwait
++#include <linux/types.h>
++#include <linux/kvm_host.h>
++
++//HLT case
++int enable_halt_xmwait = 0;
++module_param(enable_halt_xmwait, int, 0664);
++EXPORT_SYMBOL_GPL(enable_halt_xmwait);
++//we have at most 48 hardware threads
++int mwait_addr[49] = {0};// used with monitor/mwait
++EXPORT_SYMBOL_GPL(mwait_addr);
++int mwait_monitor_flag[49] = {0};// flag used to set monitor/mwait
++//module_param(mwait_monitor_flag, int, 0664);
++EXPORT_SYMBOL_GPL(mwait_monitor_flag);
++//spin lock case
++int enable_pause_xmwait = 0;
++module_param(enable_pause_xmwait, int, 0664);
++EXPORT_SYMBOL_GPL(enable_pause_xmwait);
++ulong spinlock_sleep_time_ns = 0UL;
++module_param(spinlock_sleep_time_ns, ulong, 0664);
++EXPORT_SYMBOL_GPL(spinlock_sleep_time_ns);
++//ended
++
+ #ifdef smp_mb__before_atomic
+ void __smp_mb__before_atomic(void)
+ {
+@@ -2421,6 +2586,20 @@
+ 	return sum;
+ }
+ 
++//added by 
++/*
++ * Check if only the current task is running on the cpu.
++ * 
++ * */
++bool single_task_running(void)
++{
++		if (cpu_rq(smp_processor_id())->nr_running == 1)
++					return true;
++			else
++						return false;
++}
++EXPORT_SYMBOL(single_task_running);
++
+ unsigned long long nr_context_switches(void)
+ {
+ 	int i;
+@@ -2797,6 +2976,8 @@
+ 	unsigned long *switch_count;
+ 	struct rq *rq;
+ 	int cpu;
++	long diff = 0; //added by 
++	struct timeval __ts;
+ 
+ need_resched:
+ 	preempt_disable();
+@@ -2855,6 +3036,72 @@
+ 		rq->curr = next;
+ 		++*switch_count;
+ 
++		//added by 
++		do_gettimeofday(&__ts);
++		//microseconds
++		next->__start_ts = (long) (__ts.tv_sec * 1000000l + __ts.tv_usec);
++		prev->__end_ts = next->__start_ts;
++		if (enable_vm1_flag == 1) {
++			//printk(KERN_INFO "%lld\n", prev->__end_ts - prev->__start_ts);
++			//diff = (prev->se).sum_exec_runtime - (prev->se).prev_sum_exec_runtime;
++			if (prev->pid == vm1_vcpu2_pid) {
++				vm1_vcpu2_ts = prev->__end_ts - prev->__start_ts;
++				vm1_is_vcpu2_on = 0;
++			} else if (prev->pid == vm1_vcpu3_pid) {
++				vm1_vcpu3_ts = prev->__end_ts - prev->__start_ts;
++				vm1_is_vcpu3_on = 0;
++			} else if (prev->pid == vm1_vcpu4_pid) {
++				vm1_vcpu4_ts = prev->__end_ts - prev->__start_ts;
++				vm1_is_vcpu4_on = 0;
++			} else if (prev->pid == vm1_vcpu5_pid) {
++				vm1_vcpu5_ts = prev->__end_ts - prev->__start_ts;
++				vm1_is_vcpu5_on = 0;
++			} else if (prev->pid == vm1_vcpu6_pid) {
++				vm1_vcpu6_ts = prev->__end_ts - prev->__start_ts;
++				vm1_is_vcpu6_on = 0;
++			} else if (prev->pid == vm1_vcpu7_pid) {
++				vm1_vcpu7_ts = prev->__end_ts - prev->__start_ts;
++				vm1_is_vcpu7_on = 0;
++			}
++			
++			if (next->pid == vm1_vcpu2_pid) {
++				vm1_is_vcpu2_on = 1;
++				vm1_vcpu2_curr_ts = next->__start_ts;
++			} else if (next->pid == vm1_vcpu3_pid) {
++				vm1_is_vcpu3_on = 1;
++				vm1_vcpu3_curr_ts = next->__start_ts;
++			} else if (next->pid == vm1_vcpu4_pid) {
++				vm1_is_vcpu4_on = 1;
++				vm1_vcpu4_curr_ts = next->__start_ts;
++			} else if (next->pid == vm1_vcpu5_pid) {
++				vm1_is_vcpu5_on = 1;
++				vm1_vcpu5_curr_ts = next->__start_ts;
++			} else if (next->pid == vm1_vcpu6_pid) {
++				vm1_is_vcpu6_on = 1;
++				vm1_vcpu6_curr_ts = next->__start_ts;
++			} else if (next->pid == vm1_vcpu7_pid) {
++				vm1_is_vcpu7_on = 1;
++				vm1_vcpu7_curr_ts = next->__start_ts;
++			}
++			
++#if 1
++			if ((enable_vm1_debug == 1) && (prev->pid == debug_vm1_vcpu)) {
++				printk(KERN_INFO "Current process id is %d\n", prev->pid);
++				printk(KERN_INFO "Next process id is %d\n", next->pid);
++				diff = prev->__end_ts - prev->__start_ts;
++				printk(KERN_INFO "Timeslice(us) of current process: %ld\n", diff);
++				dump_stack();
++				if (diff < 2000) {
++					printk(KERN_INFO "------------------------------------------\n");
++					printk(KERN_INFO "Timeslice is below 2000 microseconds so dump stack.\n");
++					dump_stack();
++					printk(KERN_INFO "------------------------------------------\n");
++				}
++			}
++#endif
++		}
++		//ended
++
+ 		context_switch(rq, prev, next); /* unlocks the rq */
+ 		/*
+ 		 * The context switch have flipped the stack from under us
+diff -Naur linux-3.16.39/patch.sh linux-3.16.39.virtSMT/patch.sh
+--- linux-3.16.39/patch.sh	1969-12-31 19:00:00.000000000 -0500
++++ linux-3.16.39.virtSMT/patch.sh	2018-11-25 02:19:47.636449929 -0500
+@@ -0,0 +1,10 @@
++#!/bin/bash
++
++cp ../../linux-3.16.39.retention/arch/x86/include/asm/cpufeature.h ./arch/x86/include/asm/cpufeature.h 
++cp ../../linux-3.16.39.retention/arch/x86/include/asm/msr.h ./arch/x86/include/asm/msr.h
++cp ../../linux-3.16.39.retention/arch/x86/include/asm/mwait.h ./arch/x86/include/asm/mwait.h 
++cp ../../linux-3.16.39.retention/arch/x86/kvm/x86.c ./arch/x86/kvm/x86.c 
++cp ../../linux-3.16.39.retention/include/linux/kvm_host.h ./include/linux/kvm_host.h
++cp ../../linux-3.16.39.retention/include/linux/sched.h ./include/linux/sched.h
++cp ../../linux-3.16.39.retention/kernel/sched/core.c ./kernel/sched/core.c 
++cp ../../linux-3.16.39.retention/virt/kvm/kvm_main.c ./virt/kvm/kvm_main.c
+diff -Naur linux-3.16.39/virt/kvm/kvm_main.c linux-3.16.39.virtSMT/virt/kvm/kvm_main.c
+--- linux-3.16.39/virt/kvm/kvm_main.c	2016-11-19 20:17:41.000000000 -0500
++++ linux-3.16.39.virtSMT/virt/kvm/kvm_main.c	2018-11-25 02:19:50.276475407 -0500
+@@ -65,6 +65,21 @@
+ MODULE_AUTHOR("Qumranet");
+ MODULE_LICENSE("GPL");
+ 
++//added by , halt-polling idea
++#include "../../kernel/sched/sched.h"
++/* halt polling only reduces halt latency by 5-7 us, 500us is enough */
++static unsigned int halt_poll_ns = 500000;
++module_param(halt_poll_ns, uint, S_IRUGO | S_IWUSR);
++
++/* Default doubles per-vcpu halt_poll_ns. */
++static unsigned int halt_poll_ns_grow = 2;
++module_param(halt_poll_ns_grow, int, S_IRUGO);
++
++/* Default resets per-vcpu halt_poll_ns . */
++static unsigned int halt_poll_ns_shrink;
++module_param(halt_poll_ns_shrink, int, S_IRUGO);
++//ended halt-polling idea
++
+ /*
+  * Ordering of locks:
+  *
+@@ -75,6 +90,31 @@
+ static DEFINE_RAW_SPINLOCK(kvm_count_lock);
+ LIST_HEAD(vm_list);
+ 
++//added by 
++#include <linux/preempt.h>
++#include <linux/module.h> 
++#include <asm/mwait.h>
++#include <asm/processor.h>
++#include <asm/delay.h>
++#include <asm/timer.h>
++#include <linux/delay.h>
++#include <linux/timex.h>
++#ifdef CONFIG_SMP
++#include <asm/smp.h>
++#endif
++extern int mwait_addr[49];
++//we have 48 hardware threads at most and we use [1...48] to represent
++//them
++extern int enable_halt_xmwait;
++extern int enable_pause_xmwait;
++extern int mwait_monitor_flag;
++extern ulong spinlock_sleep_time_ns;
++extern bool single_task_running(void);
++extern int rr_dedicated_vcpu_id;
++extern int enable_rr;
++extern int rr_retention_time;
++//ended
++
+ static cpumask_var_t cpus_hardware_enabled;
+ static int kvm_usage_count = 0;
+ static atomic_t hardware_enable_failed;
+@@ -220,6 +260,15 @@
+ 	vcpu->cpu = -1;
+ 	vcpu->kvm = kvm;
+ 	vcpu->vcpu_id = id;
++	vcpu->mwait_idx = 0; //added by 
++	vcpu->sl_flag = 0; //added by 
++	vcpu->halt_poll_ns = 0; //added by 
++	vcpu->mwait_flag = 0; //added by 
++	vcpu->rr_flag = 0;
++	//vcpu->rr_start = (ktime_t) 0;
++	//vcpu->rr_end = (ktime_t) 0;
++	//vcpu->rr_last = (ktime_t) 0;
++	//vcpu->rr_diff = (ktime_t) 0;
+ 	vcpu->pid = NULL;
+ 	init_waitqueue_head(&vcpu->wq);
+ 	kvm_async_pf_vcpu_init(vcpu);
+@@ -1674,13 +1723,158 @@
+ }
+ EXPORT_SYMBOL_GPL(mark_page_dirty);
+ 
++//added by , for halt-polling idea
++static void grow_halt_poll_ns(struct kvm_vcpu *vcpu)
++{
++	int val = vcpu->halt_poll_ns;
++
++	/* 10us base */
++	if (val == 0 && halt_poll_ns_grow)
++		val = 10000;
++	else
++		val *= halt_poll_ns_grow;
++	
++	vcpu->halt_poll_ns = val;
++}
++
++static void shrink_halt_poll_ns(struct kvm_vcpu *vcpu)
++{
++	int val = vcpu->halt_poll_ns;
++
++	if (halt_poll_ns_shrink == 0)
++		val = 0;
++	else
++		val /= halt_poll_ns_shrink;
++
++	vcpu->halt_poll_ns = val;
++}
++//ended halt-polling
++
++static int kvm_vcpu_check_block(struct kvm_vcpu *vcpu)
++{
++	if (kvm_arch_vcpu_runnable(vcpu)) {
++		kvm_make_request(KVM_REQ_UNHALT, vcpu);
++		return -EINTR;
++	}
++	if (kvm_cpu_has_pending_timer(vcpu))
++		return -EINTR;
++	if (signal_pending(current))
++		return -EINTR;
++
++	return 0;
++}
++
+ /*
+  * The vCPU has executed a HLT instruction with in-kernel mode enabled.
+  */
+ void kvm_vcpu_block(struct kvm_vcpu *vcpu)
+ {
++	ktime_t start, cur;
+ 	DEFINE_WAIT(wait);
++	u64 block_ns;
++	void *ptr;
++	struct pid *pid;
++	struct task_struct *task = NULL;
++	struct cfs_rq *cfs_rq = NULL;
++	struct rq *rq = NULL;
++	int i = 0;
++
++	ktime_t rr_cur, rr_diff;
++
++	rcu_read_lock();
++	pid = rcu_dereference(vcpu->pid);
++	if (pid)
++		task = get_pid_task(vcpu->pid, PIDTYPE_PID);
++	rcu_read_unlock();
++	if (!task)
++		;
++	start = cur = ktime_get();
++	if (vcpu->halt_poll_ns) {
++		ktime_t stop = ktime_add_ns(ktime_get(), vcpu->halt_poll_ns);
++		
++		do {
++			/*
++			 * This sets KVM_REQ_UNHALT if an interrupt arrives.*/
++			if (kvm_vcpu_check_block(vcpu) < 0) {
++				//++vcpu->stat.halt_successful_poll;
++				goto out;
++			}
++			cur = ktime_get();
++		} while (single_task_running() && ktime_before(cur, stop));
++	}
+ 
++	//added by , xMwait
++/*added by */
++	if (enable_halt_xmwait) {
++		//dedicated cores to handle resource retention
++		if (enable_rr && vcpu->vcpu_id == rr_dedicated_vcpu_id) {
++			while (1) {
++				for (i = 0; i < rr_dedicated_vcpu_id; i++) {
++					if (vcpu->kvm->vcpus[i]->rr_flag == 1) {
++						rr_cur = ktime_get();
++						rr_diff = ktime_sub(rr_cur, vcpu->kvm->vcpus[i]->rr_start);
++						s64 diff_ns = ktime_to_ns(rr_diff);
++						if (diff_ns >= (s64) rr_retention_time) {
++							vcpu->kvm->vcpus[i]->mwait_idx = 1;
++							vcpu->kvm->vcpus[i]->rr_flag = 0;
++						}
++					}
++				}
++				if (kvm_vcpu_check_block(vcpu) < 0) {
++					goto out;
++				}
++			}
++		}
++
++		do {
++			if (kvm_vcpu_check_block(vcpu) < 0) {
++				goto out;
++			}
++			vcpu->mwait_idx = 0;
++		//vcpu->mwait_idx = smp_processor_id() + 1;
++		/*in case, wakeup is executed at first*/
++		//mwait_addr[vcpu->mwait_idx] = 0;
++			ptr = (void *)&(vcpu->mwait_idx);
++		//disable kernel preemption to avoid to be scheduled out
++		//preempt_disable();
++		//printk("smp_processor_id is %d\n", smp_processor_id());
++		//printk("vcpu id is %d\n", vcpu->vcpu_id);
++			if (vcpu->mwait_idx == 0) {
++		//while (mwait_addr[vcpu->mwait_idx] == 0) {
++				cfs_rq = task->se.cfs_rq;
++				rq = cfs_rq->rq;
++				u64 __start = rq->clock_task;
++				__monitor(ptr,0,0);
++				smp_mb();
++			//if (mwait_addr[smp_processor_id()] == 0) {
++				vcpu->rr_flag = 1;
++				vcpu->rr_start = ktime_get();
++				__sti_mwait(0,0);
++				//vcpu->rr_end = ktime_get();
++				//vcpu->rr_last = vcpu->rr_end - vcpu->rr_start;
++				//vcpu->rr_diff = vcpu->rr_last;
++				u64 delta_exec = (rq->clock_task) - __start;
++				(task->se).exec_start += delta_exec;
++			//__mwait(0,1);
++			//}
++			//mwait_monitor_flag[smp_processor_id()] = 1;
++			}
++			if (vcpu->mwait_idx == 1) {
++		//enable kernel preemption
++		//sched_preempt_enable_no_resched();
++		/*reset monitor/mwait value*/
++				vcpu->mwait_idx = 0;
++				if (vcpu->rr_flag == 0) goto out1;
++		//mwait_addr[vcpu->mwait_idx] = 0;
++		//mwait_monitor_flag[smp_processor_id()] = 0;
++		//preempt_enable();
++				goto out; //must break since cannot while(1);
++			} else
++				continue;
++		} while (single_task_running());
++	}
++
++out1:
+ 	for (;;) {
+ 		prepare_to_wait(&vcpu->wq, &wait, TASK_INTERRUPTIBLE);
+ 
+@@ -1694,9 +1888,29 @@
+ 			break;
+ 
+ 		schedule();
++/*ended*/
+ 	}
+ 
+ 	finish_wait(&vcpu->wq, &wait);
++//added by 
++	cur = ktime_get();
++out:
++	block_ns = ktime_to_ns(cur) - ktime_to_ns(start);
++	
++	if (halt_poll_ns) {
++		if (block_ns <= vcpu->halt_poll_ns)
++			;
++		/* we had a long block, shrink polling */
++		else if (vcpu->halt_poll_ns && block_ns > halt_poll_ns)
++			shrink_halt_poll_ns(vcpu);
++		/* we had a short halt and our poll time is too small */
++		else if (vcpu->halt_poll_ns < halt_poll_ns &&
++				block_ns < halt_poll_ns)
++			grow_halt_poll_ns(vcpu);
++		else
++			vcpu->halt_poll_ns = 0;
++	}
++//ended
+ }
+ EXPORT_SYMBOL_GPL(kvm_vcpu_block);
+ 
+@@ -1789,17 +2003,43 @@
+ #endif
+ }
+ 
++//added by 
++#if 0
++static void xmwait_delay(unsigned long __loops) {
++	u64 start, end, delay, loops = __loops;
++
++	//start = rdtsc_ordered();
++	start = __native_read_tsc();
++
++	for (;;) {
++		delay = min_t(u64, MWAITX_MAX_LOOPS, loops);
++		__monitor(this_cpu_ptr(&cpu_tss), 0, 0);
++		__mwaitx(MWAITX_DISABLE_CSTATES, delay, MWAITX_ECX_TIMER_ENABLE);
++		end = __native_read_tsc();
++
++		if (loops <= end - start)
++			break;
++
++		loops -= end - start;
++		start = end;
++	}
++}
++#endif
++//end
++
+ void kvm_vcpu_on_spin(struct kvm_vcpu *me)
+ {
+-	struct kvm *kvm = me->kvm;
+-	struct kvm_vcpu *vcpu;
+-	int last_boosted_vcpu = me->kvm->last_boosted_vcpu;
+-	int yielded = 0;
+-	int try = 3;
+-	int pass;
+-	int i;
++	//added by  for spin lock case
++	//if (enable_pause_xmwait != 1) {
++		struct kvm *kvm = me->kvm;
++		struct kvm_vcpu *vcpu;
++		int last_boosted_vcpu = me->kvm->last_boosted_vcpu;
++		int yielded = 0;
++		int try = 3;
++		int pass;
++		int i;
+ 
+-	kvm_vcpu_set_in_spin_loop(me, true);
++		kvm_vcpu_set_in_spin_loop(me, true);
+ 	/*
+ 	 * We boost the priority of a VCPU that is runnable but not
+ 	 * currently running, because it got preempted by something
+@@ -1807,37 +2047,88 @@
+ 	 * VCPU is holding the lock that we need and will release it.
+ 	 * We approximate round-robin by starting at the last boosted VCPU.
+ 	 */
+-	for (pass = 0; pass < 2 && !yielded && try; pass++) {
+-		kvm_for_each_vcpu(i, vcpu, kvm) {
+-			if (!pass && i <= last_boosted_vcpu) {
+-				i = last_boosted_vcpu;
+-				continue;
+-			} else if (pass && i > last_boosted_vcpu)
+-				break;
+-			if (!ACCESS_ONCE(vcpu->preempted))
+-				continue;
+-			if (vcpu == me)
+-				continue;
+-			if (waitqueue_active(&vcpu->wq) && !kvm_arch_vcpu_runnable(vcpu))
+-				continue;
+-			if (!kvm_vcpu_eligible_for_directed_yield(vcpu))
+-				continue;
+-
+-			yielded = kvm_vcpu_yield_to(vcpu);
+-			if (yielded > 0) {
+-				kvm->last_boosted_vcpu = i;
+-				break;
+-			} else if (yielded < 0) {
+-				try--;
+-				if (!try)
++		for (pass = 0; pass < 2 && !yielded && try; pass++) {
++			kvm_for_each_vcpu(i, vcpu, kvm) {
++				if (!pass && i <= last_boosted_vcpu) {
++					i = last_boosted_vcpu;
++					continue;
++				} else if (pass && i > last_boosted_vcpu)
+ 					break;
++				if (!ACCESS_ONCE(vcpu->preempted))
++					continue;
++				if (vcpu == me) {
++					if (enable_pause_xmwait == 1 && spinlock_sleep_time_ns != 0UL) {
++						u64 start, end, delay, loops = spinlock_sleep_time_ns;
++						//start = rdtsc_ordered();
++						start = __native_read_tsc();
++						for (;;) {
++							delay = min_t(u64, MWAITX_MAX_LOOPS, loops);
++							//__monitor(this_cpu_ptr(&cpu_tss), 0, 0);
++							//DEFINE_WAIT(wait);
++							//prepare_to_wait(&me->wq, &wait, TASK_INTERRUPTIBLE);
++							__monitorx((void *)&(me->sl_flag), 0, 0);
++							__mwaitx(MWAITX_DISABLE_CSTATES, delay, MWAITX_ECX_TIMER_ENABLE);
++							//__sti_mwaitx(0, 10000UL, MWAITX_ECX_TIMER_ENABLE);
++							//__sti_mwaitx(0, spinlock_sleep_time_ns, MWAITX_ECX_TIMER_ENABLE);
++							//finish_wait(&me->wq, &wait);
++							//__mwaitx(MWAITX_DISABLE_CSTATES, delay, MWAITX_ECX_TIMER_ENABLE);
++							end = __native_read_tsc();
++			
++							if (loops <= end - start)
++								break;
++							loops -= (end - start);
++							start = end;
++						}
++					}
++					continue;
++				}
++				if (waitqueue_active(&vcpu->wq) && !kvm_arch_vcpu_runnable(vcpu))
++					continue;
++				if (!kvm_vcpu_eligible_for_directed_yield(vcpu))
++					continue;
++
++#if 1
++				if (enable_pause_xmwait == 0 || spinlock_sleep_time_ns == 0UL) {
++					yielded = kvm_vcpu_yield_to(vcpu);
++					if (yielded > 0) {
++						kvm->last_boosted_vcpu = i;
++						break;
++					} else if (yielded < 0) {
++#endif
++					try--;
++					if (!try)
++						break;
++					}
++				} else {
++					try--;
++					if (!try)
++						break;
++				}
+ 			}
+ 		}
+-	}
+-	kvm_vcpu_set_in_spin_loop(me, false);
++		kvm_vcpu_set_in_spin_loop(me, false);
+ 
+ 	/* Ensure vcpu is not eligible during next spinloop */
+-	kvm_vcpu_set_dy_eligible(me, false);
++		kvm_vcpu_set_dy_eligible(me, false);
++	//} else {
++		/*
++		//added by , spin-lock timer
++		//unsigned long expires;
++		ktime_t expires;
++		DEFINE_WAIT(wait);
++		prepare_to_wait(&me->wq, &wait, TASK_INTERRUPTIBLE);
++		// Sleep for 100 us, and hope lock-holder got scheduled
++		//expires = ktime_add_ns(ktime_get(), 100000UL);
++		expires = ktime_add_ns(ktime_get(), spinlock_sleep_time_ns);
++		//expires = 1000000UL;
++		//__monitorx((void *)&(me->sl_flag), 0, 0);
++		//__mwaitx(MWAITX_DISABLE_CSTATES, expires, MWAITX_ECX_TIMER_ENABLE);
++		schedule_hrtimeout(&expires, HRTIMER_MODE_ABS);
++		finish_wait(&me->wq, &wait);
++		//end*/
++		
++		//u64 start, end, delay = spinlock_sleep_time_ns, loops = 100000UL;
++	//}
+ }
+ EXPORT_SYMBOL_GPL(kvm_vcpu_on_spin);
+ 

@@ -1,0 +1,33 @@
+#!/bin/sh 
+
+NUMITERATIONS=1000000
+
+ALLCOREFILE=thousand/allcore_result_noturbo
+ONECOREFILE=thousand/onecore_result_noturbo
+BASELINEFILE=thousand/baseline_result_noturbo
+
+echo "" > $ALLCOREFILE
+echo "" > $ONECOREFILE
+echo "" > $BASELINEFILE
+
+
+#for i in 0 5 10 20 30 40 50 60 70 80 90 100 200 300 400 500 600 700 800 900 1000 10000 20000 50000 100000 200000 500000 1000000 2000000 5000000 10000000; do 
+#for i in 0 10 100 1000; do 
+for i in 2000 5000 10000; do 
+    echo -n "$i " >> $ALLCOREFILE
+    echo -n "$i " >> $ONECOREFILE
+    echo -n "$i " >> $BASELINEFILE
+    for j in 1 2 3 ; do
+	val=$( (/usr/bin/time -f "%e" ./testwo $i $NUMITERATIONS 0 > /dev/null ) 2>&1 )
+	echo -n "$val " >> $ALLCOREFILE
+	val=$( (/usr/bin/time -f "%e" ./testwo $i $NUMITERATIONS 1 > /dev/null ) 2>&1 )
+	echo -n "$val " >> $ONECOREFILE
+	val=$( (/usr/bin/time -f "%e" ./testwo_baseline $i $NUMITERATIONS 1 > /dev/null ) 2>&1 )
+	echo -n "$val " >> $BASELINEFILE
+    done
+
+    echo "" >> $ALLCOREFILE
+    echo "" >> $ONECOREFILE
+    echo "" >> $BASELINEFILE
+done
+

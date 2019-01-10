@@ -1,0 +1,187 @@
+diff -Naur linux-4.19.1/arch/x86/kvm/x86.c linux-4.19.1.virt-SMT/arch/x86/kvm/x86.c
+--- linux-4.19.1/arch/x86/kvm/x86.c	2018-11-04 08:50:54.000000000 -0500
++++ linux-4.19.1.virt-SMT/arch/x86/kvm/x86.c	2018-11-13 15:46:41.140624538 -0500
+@@ -131,6 +131,13 @@
+ u64 __read_mostly kvm_default_tsc_scaling_ratio;
+ EXPORT_SYMBOL_GPL(kvm_default_tsc_scaling_ratio);
+ 
++//added by 
++#include <asm/mwait.h>
++extern int enable_halt_xmwait;
++extern int mwait_addr[49];
++extern int mwait_monitor_flag;
++//ended
++
+ /* tsc tolerance in parts per million - default to 1/2 of the NTP threshold */
+ static u32 __read_mostly tsc_tolerance_ppm = 250;
+ module_param(tsc_tolerance_ppm, uint, S_IRUGO | S_IWUSR);
+@@ -7602,6 +7609,11 @@
+ 		vcpu->arch.switch_db_regs &= ~KVM_DEBUGREG_RELOAD;
+ 	}
+ 
++	//added by 
++	if (enable_halt_xmwait) {
++		vcpu->mwait_idx = 1;
++	}
++
+ 	kvm_x86_ops->run(vcpu);
+ 
+ 	/*
+diff -Naur linux-4.19.1/include/linux/kvm_host.h linux-4.19.1.virt-SMT/include/linux/kvm_host.h
+--- linux-4.19.1/include/linux/kvm_host.h	2018-11-04 08:50:54.000000000 -0500
++++ linux-4.19.1.virt-SMT/include/linux/kvm_host.h	2018-11-13 15:47:03.387625877 -0500
+@@ -223,6 +223,10 @@
+ 	int cpu;
+ 	int vcpu_id;
+ 	int srcu_idx;
++	int mwait_idx; //added by 
++	int sl_flag; //added by , spin-lock flag
++	int mwait_flag; //added by 
++	//unsigned int halt_poll_ns; //added by 
+ 	int mode;
+ 	u64 requests;
+ 	unsigned long guest_debug;
+diff -Naur linux-4.19.1/kernel/sched/core.c linux-4.19.1.virt-SMT/kernel/sched/core.c
+--- linux-4.19.1/kernel/sched/core.c	2018-11-04 08:50:54.000000000 -0500
++++ linux-4.19.1.virt-SMT/kernel/sched/core.c	2018-11-13 15:47:39.766628066 -0500
+@@ -22,6 +22,31 @@
+ #define CREATE_TRACE_POINTS
+ #include <trace/events/sched.h>
+ 
++//Added by 
++//For xMwait
++#include <linux/types.h>
++#include <linux/kvm_host.h>
++#include <linux/time.h>
++
++//HLT case
++int enable_halt_xmwait = 0;
++module_param(enable_halt_xmwait, int, 0664);
++EXPORT_SYMBOL_GPL(enable_halt_xmwait);
++//we have at most 48 hardware threads
++int mwait_addr[49] = {0};// used with monitor/mwait
++EXPORT_SYMBOL_GPL(mwait_addr);
++int mwait_monitor_flag[49] = {0};// flag used to set monitor/mwait
++//module_param(mwait_monitor_flag, int, 0664);
++EXPORT_SYMBOL_GPL(mwait_monitor_flag);
++//spin lock case
++int enable_pause_xmwait = 0;
++module_param(enable_pause_xmwait, int, 0664);
++EXPORT_SYMBOL_GPL(enable_pause_xmwait);
++ulong spinlock_sleep_time_ns = 0UL;
++module_param(spinlock_sleep_time_ns, ulong, 0664);
++EXPORT_SYMBOL_GPL(spinlock_sleep_time_ns);
++//ended
++
+ DEFINE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
+ 
+ #if defined(CONFIG_SCHED_DEBUG) && defined(HAVE_JUMP_LABEL)
+diff -Naur linux-4.19.1/virt/kvm/kvm_main.c linux-4.19.1.virt-SMT/virt/kvm/kvm_main.c
+--- linux-4.19.1/virt/kvm/kvm_main.c	2018-11-04 08:50:54.000000000 -0500
++++ linux-4.19.1.virt-SMT/virt/kvm/kvm_main.c	2018-11-13 15:48:06.334629664 -0500
+@@ -71,6 +71,30 @@
+ MODULE_AUTHOR("Qumranet");
+ MODULE_LICENSE("GPL");
+ 
++//added by 
++#include "../../kernel/sched/sched.h"
++//added by 
++#include <linux/preempt.h>
++#include <linux/module.h> 
++#include <asm/mwait.h>
++#include <asm/processor.h>
++#include <asm/delay.h>
++#include <asm/timer.h>
++#include <linux/delay.h>
++#include <linux/timex.h>
++#ifdef CONFIG_SMP
++#include <asm/smp.h>
++#endif
++extern int mwait_addr[49];
++//we have 48 hardware threads at most and we use [1...48] to represent
++//them
++extern int enable_halt_xmwait;
++extern int enable_pause_xmwait;
++extern int mwait_monitor_flag;
++extern ulong spinlock_sleep_time_ns;
++extern bool single_task_running(void);
++//ended
++
+ /* Architectures should define their poll value according to the halt latency */
+ unsigned int halt_poll_ns = KVM_HALT_POLL_NS_DEFAULT;
+ module_param(halt_poll_ns, uint, 0644);
+@@ -296,6 +320,10 @@
+ 	vcpu->cpu = -1;
+ 	vcpu->kvm = kvm;
+ 	vcpu->vcpu_id = id;
++	vcpu->mwait_idx = 0; //added by 
++	vcpu->sl_flag = 0; //added by 
++	vcpu->halt_poll_ns = 0; //added by 
++	vcpu->mwait_flag = 0; //added by 
+ 	vcpu->pid = NULL;
+ 	init_swait_queue_head(&vcpu->wq);
+ 	kvm_async_pf_vcpu_init(vcpu);
+@@ -2158,6 +2186,19 @@
+ 	DECLARE_SWAITQUEUE(wait);
+ 	bool waited = false;
+ 	u64 block_ns;
++	void *ptr;
++	struct pid *pid;
++	struct task_struct *task = NULL;
++	struct cfs_rq *cfs_rq = NULL;
++	struct rq *rq = NULL;
++
++	rcu_read_lock();
++	pid = rcu_dereference(vcpu->pid);
++	if (pid)
++		task = get_pid_task(vcpu->pid, PIDTYPE_PID);
++	rcu_read_unlock();
++	if (!task)
++		;
+ 
+ 	start = cur = ktime_get();
+ 	if (vcpu->halt_poll_ns) {
+@@ -2179,7 +2220,33 @@
+ 		} while (single_task_running() && ktime_before(cur, stop));
+ 	}
+ 
+-	kvm_arch_vcpu_blocking(vcpu);
++	//added by 
++	if (enable_halt_xmwait) {
++		do {
++			if (kvm_vcpu_check_block(vcpu) < 0) {
++				goto out;
++			}
++			vcpu->mwait_idx = 0;
++			ptr = (void *)&(vcpu->mwait_idx);
++			if (vcpu->mwait_idx == 0) {
++				cfs_rq = task->se.cfs_rq;
++				rq = cfs_rq->rq;
++				u64 __start = rq->clock_task;
++				__monitor(ptr,0,0);
++				smp_mb();
++				__sti_mwait(0,0);
++				u64 delta_exec = (rq->clock_task) - __start;
++				(task->se).exec_start += delta_exec;
++			}
++			if (vcpu->mwait_idx == 1) {
++				vcpu->mwait_idx = 0;
++				goto out;
++			} else
++				continue;
++		} while (single_task_running());
++	}
++
++	//kvm_arch_vcpu_blocking(vcpu);
+ 
+ 	for (;;) {
+ 		prepare_to_swait_exclusive(&vcpu->wq, &wait, TASK_INTERRUPTIBLE);
+@@ -2194,7 +2261,7 @@
+ 	finish_swait(&vcpu->wq, &wait);
+ 	cur = ktime_get();
+ 
+-	kvm_arch_vcpu_unblocking(vcpu);
++	//kvm_arch_vcpu_unblocking(vcpu);
+ out:
+ 	block_ns = ktime_to_ns(cur) - ktime_to_ns(start);
+ 
